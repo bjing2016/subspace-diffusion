@@ -18,7 +18,7 @@
 import jax
 import tensorflow as tf
 import tensorflow_datasets as tfds
-
+import numpy as np
 
 def get_data_scaler(config):
   """Data normalizer. Assume data are always in [0, 1]."""
@@ -61,6 +61,15 @@ def resize_small(image, resolution):
   return tf.image.resize(image, [h, w], antialias=True)
 
 
+def downsampling(image, resolution):
+  
+  """Shrink an image to the given resolution."""
+  h, w = image.shape[0], image.shape[1]
+  kh, kw = h//resolution[0], w//resolution[1]
+  image = tf.nn.avg_pool2d(tf.expand_dims(image, 0), kh, kw, padding='VALID') * kh
+  return tf.squeeze(image)
+
+
 def central_crop(image, size):
   """Crop the center of an image to the given size."""
   top = (image.shape[0] - size) // 2
@@ -69,6 +78,7 @@ def central_crop(image, size):
 
 
 def get_dataset(config, uniform_dequantization=False, evaluation=False):
+    
   """Create data loaders for training and evaluation.
 
   Args:
@@ -98,8 +108,8 @@ def get_dataset(config, uniform_dequantization=False, evaluation=False):
 
     def resize_op(img):
       img = tf.image.convert_image_dtype(img, tf.float32)
-      return tf.image.resize(img, [config.data.image_size, config.data.image_size], antialias=True)
-
+      return downsampling(img, [config.data.image_size, config.data.image_size])
+    
   elif config.data.dataset == 'SVHN':
     dataset_builder = tfds.builder('svhn_cropped')
     train_split_name = 'train'
@@ -131,23 +141,33 @@ def get_dataset(config, uniform_dequantization=False, evaluation=False):
         img = resize_small(img, config.data.image_size)
         img = central_crop(img, config.data.image_size)
         return img
-
     else:
+      def downsampling_mod(image, resolution, img_res=256):
+          kh, kw = img_res//resolution[0], img_res//resolution[1]
+          image = tf.nn.avg_pool2d(tf.expand_dims(image, 0), kh, kw, padding='VALID') * kh
+          return tf.squeeze(image)
+
       def resize_op(img):
-        img = crop_resize(img, config.data.image_size)
+        img = crop_resize(img, 256)
         img = tf.image.convert_image_dtype(img, tf.float32)
-        return img
+        return downsampling_mod(img, [config.data.image_size, config.data.image_size])
 
   elif config.data.dataset in ['FFHQ', 'CelebAHQ']:
     dataset_builder = tf.data.TFRecordDataset(config.data.tfrecords_path)
     train_split_name = eval_split_name = 'train'
-
+   
   else:
     raise NotImplementedError(
       f'Dataset {config.data.dataset} not yet supported.')
 
   # Customize preprocess functions for each dataset.
   if config.data.dataset in ['FFHQ', 'CelebAHQ']:
+    
+    def downsampling_mod(image, resolution, img_res=256):
+      kh, kw = img_res//resolution[0], img_res//resolution[1]
+      image = tf.nn.avg_pool2d(tf.expand_dims(image, 0), kh, kw, padding='VALID') * kh
+      return tf.squeeze(image)
+    
     def preprocess_fn(d):
       sample = tf.io.parse_single_example(d, features={
         'shape': tf.io.FixedLenFeature([3], tf.int64),
@@ -156,6 +176,7 @@ def get_dataset(config, uniform_dequantization=False, evaluation=False):
       data = tf.reshape(data, sample['shape'])
       data = tf.transpose(data, (1, 2, 0))
       img = tf.image.convert_image_dtype(data, tf.float32)
+      img = downsampling_mod(img, [config.data.image_size, config.data.image_size])
       if config.data.random_flip and not evaluation:
         img = tf.image.random_flip_left_right(img)
       if uniform_dequantization:
@@ -183,10 +204,10 @@ def get_dataset(config, uniform_dequantization=False, evaluation=False):
       dataset_builder.download_and_prepare()
       ds = dataset_builder.as_dataset(
         split=split, shuffle_files=True, read_config=read_config)
-    else:
+    else: #####
       ds = dataset_builder.with_options(dataset_options)
     ds = ds.repeat(count=num_epochs)
-    ds = ds.shuffle(shuffle_buffer_size)
+    #ds = ds.shuffle(shuffle_buffer_size)
     ds = ds.map(preprocess_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
     ds = ds.batch(batch_size, drop_remainder=True)
     return ds.prefetch(prefetch_size)

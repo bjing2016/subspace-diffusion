@@ -42,8 +42,7 @@ from torchvision.utils import make_grid, save_image
 from utils import save_checkpoint, restore_checkpoint
 
 FLAGS = flags.FLAGS
-
-
+    
 def train(config, workdir):
   """Runs the training pipeline.
 
@@ -52,6 +51,7 @@ def train(config, workdir):
     workdir: Working directory for checkpoints and TF summaries. If this
       contains checkpoint training will be resumed from the latest checkpoint.
   """
+
 
   # Create directories for experimental logs
   sample_dir = os.path.join(workdir, "samples")
@@ -62,7 +62,9 @@ def train(config, workdir):
   writer = tensorboard.SummaryWriter(tb_dir)
 
   # Initialize model.
+
   score_model = mutils.create_model(config)
+
   ema = ExponentialMovingAverage(score_model.parameters(), decay=config.model.ema_rate)
   optimizer = losses.get_optimizer(config, score_model.parameters())
   state = dict(optimizer=optimizer, model=score_model, ema=ema, step=0)
@@ -124,8 +126,12 @@ def train(config, workdir):
 
   for step in range(initial_step, num_train_steps + 1):
     # Convert data to JAX arrays and normalize them. Use ._numpy() to avoid copy.
-    batch = torch.from_numpy(next(train_iter)['image']._numpy()).to(config.device).float()
-    batch = batch.permute(0, 3, 1, 2)
+    if config.data.dataset in ['CIFAR-GLOW']:
+        batch = torch.from_numpy(next(train_iter)._numpy()).to(config.device).float()
+    else:
+        batch = torch.from_numpy(next(train_iter)['image']._numpy()).to(config.device).float()
+        batch = batch.permute(0, 3, 1, 2)
+        
     batch = scaler(batch)
     # Execute one training step
     loss = train_step_fn(state, batch)
@@ -139,13 +145,15 @@ def train(config, workdir):
 
     # Report the loss on an evaluation dataset periodically
     if step % config.training.eval_freq == 0:
-      eval_batch = torch.from_numpy(next(eval_iter)['image']._numpy()).to(config.device).float()
-      eval_batch = eval_batch.permute(0, 3, 1, 2)
+      if config.data.dataset in ['CIFAR-GLOW']:
+        eval_batch = torch.from_numpy(next(eval_iter)._numpy()).to(config.device).float()
+      else:  
+        eval_batch = torch.from_numpy(next(eval_iter)['image']._numpy()).to(config.device).float()
+        eval_batch = eval_batch.permute(0, 3, 1, 2)
       eval_batch = scaler(eval_batch)
       eval_loss = eval_step_fn(state, eval_batch)
       logging.info("step: %d, eval_loss: %.5e" % (step, eval_loss.item()))
       writer.add_scalar("eval_loss", eval_loss.item(), step)
-
     # Save a checkpoint periodically and generate samples if needed
     if step != 0 and step % config.training.snapshot_freq == 0 or step == num_train_steps:
       # Save the checkpoint.
@@ -160,8 +168,10 @@ def train(config, workdir):
         ema.restore(score_model.parameters())
         this_sample_dir = os.path.join(sample_dir, "iter_{}".format(step))
         tf.io.gfile.makedirs(this_sample_dir)
+       
         nrow = int(np.sqrt(sample.shape[0]))
         image_grid = make_grid(sample, nrow, padding=2)
+        
         sample = np.clip(sample.permute(0, 2, 3, 1).cpu().numpy() * 255, 0, 255).astype(np.uint8)
         with tf.io.gfile.GFile(
             os.path.join(this_sample_dir, "sample.np"), "wb") as fout:
@@ -169,8 +179,7 @@ def train(config, workdir):
 
         with tf.io.gfile.GFile(
             os.path.join(this_sample_dir, "sample.png"), "wb") as fout:
-          save_image(image_grid, fout)
-
+          save_image(image_grid, fout, format='png')
 
 def evaluate(config,
              workdir,
@@ -328,15 +337,17 @@ def evaluate(config,
 
     # Generate samples and compute IS/FID/KID when enabled
     if config.eval.enable_sampling:
-      num_sampling_rounds = config.eval.num_samples // config.eval.batch_size + 1
+      num_sampling_rounds = (config.eval.num_samples - 1) // config.eval.batch_size + 1
       for r in range(num_sampling_rounds):
         logging.info("sampling -- ckpt: %d, round: %d" % (ckpt, r))
+ 
 
         # Directory to save samples. Different for each host to avoid writing conflicts
         this_sample_dir = os.path.join(
           eval_dir, f"ckpt_{ckpt}")
         tf.io.gfile.makedirs(this_sample_dir)
         samples, n = sampling_fn(score_model)
+        
         samples = np.clip(samples.permute(0, 2, 3, 1).cpu().numpy() * 255., 0, 255).astype(np.uint8)
         samples = samples.reshape(
           (-1, config.data.image_size, config.data.image_size, config.data.num_channels))
@@ -406,3 +417,139 @@ def evaluate(config,
         io_buffer = io.BytesIO()
         np.savez_compressed(io_buffer, IS=inception_score, fid=fid, kid=kid)
         f.write(io_buffer.getvalue())
+
+
+def evaluate_subspace(config, workdir, save_name,
+                     checkpoint_full, checkpoint_subspace):
+  """Evaluate trained models.
+
+  Args:
+    config: Configuration to use.
+    workdir: Working directory for checkpoints.
+    eval_folder: The subfolder for storing evaluation results. Default to
+      "eval".
+  """
+    
+  # Create directory to eval_folder
+  eval_dir = workdir
+  tf.io.gfile.makedirs(eval_dir)
+
+  # Build data pipeline
+  train_ds, eval_ds, _ = datasets.get_dataset(config,
+                                              uniform_dequantization=config.data.uniform_dequantization,
+                                              evaluation=True)
+
+  # Create data normalizer and its inverse
+  scaler = datasets.get_data_scaler(config)
+  inverse_scaler = datasets.get_data_inverse_scaler(config)
+
+  # Initialize model
+  score_model = mutils.create_model(config, subspace=True)
+
+  optimizer_full = losses.get_optimizer(config, score_model.full_score_model.parameters())
+  ema_full = ExponentialMovingAverage(score_model.full_score_model.parameters(), decay=config.model.ema_rate)
+  state_full = dict(optimizer=optimizer_full, model=score_model.full_score_model, ema=ema_full, step=0)
+
+  optimizer_subspace = losses.get_optimizer(config, score_model.subspace_score_model.parameters())
+  ema_subspace = ExponentialMovingAverage(score_model.subspace_score_model.parameters(), decay=config.model.ema_rate)
+  state_subspace = dict(optimizer=optimizer_subspace, model=score_model.subspace_score_model, ema=ema_subspace, step=0)
+
+  # Setup SDEs
+  if config.training.sde.lower() == 'vpsde':
+    sde = sde_lib.VPSDE(beta_min=config.model.beta_min, beta_max=config.model.beta_max, N=config.model.num_scales)
+    sampling_eps = 1e-3
+  elif config.training.sde.lower() == 'subvpsde':
+    sde = sde_lib.subVPSDE(beta_min=config.model.beta_min, beta_max=config.model.beta_max, N=config.model.num_scales)
+    sampling_eps = 1e-3
+  elif config.training.sde.lower() == 'vesde':
+    sde = sde_lib.VESDE(sigma_min=config.model.sigma_min, sigma_max=config.model.sigma_max, N=config.model.num_scales)
+    sampling_eps = 1e-5
+  else:
+    raise NotImplementedError(f"SDE {config.training.sde} unknown.")
+
+  # Create the one-step evaluation function when loss computation is enabled
+  if config.eval.enable_loss:
+    optimize_fn = losses.optimization_manager(config)
+    continuous = config.training.continuous
+    likelihood_weighting = config.training.likelihood_weighting
+
+    reduce_mean = config.training.reduce_mean
+    eval_step = losses.get_step_fn(sde, train=False, optimize_fn=optimize_fn,
+                                   reduce_mean=reduce_mean,
+                                   continuous=continuous,
+                                   likelihood_weighting=likelihood_weighting)
+
+  # Create data loaders for likelihood evaluation. Only evaluate on uniformly dequantized data
+  train_ds_bpd, eval_ds_bpd, _ = datasets.get_dataset(config,
+                                                      uniform_dequantization=True, evaluation=True)
+  if config.eval.bpd_dataset.lower() == 'train':
+    ds_bpd = train_ds_bpd
+    bpd_num_repeats = 1
+  elif config.eval.bpd_dataset.lower() == 'test':
+    ds_bpd = eval_ds_bpd
+    bpd_num_repeats = 1 
+  else:
+    raise ValueError(f"No bpd dataset {config.eval.bpd_dataset} recognized.")
+
+  # Build the likelihood computation function when likelihood is enabled
+  if config.eval.enable_bpd:
+    likelihood_fn = likelihood.get_likelihood_fn(sde, inverse_scaler)
+
+  # Build the sampling function when sampling is enabled
+  if config.eval.enable_sampling:
+    sampling_shape = (config.eval.batch_size,
+                      config.data.num_channels,
+                      config.data.image_size, config.data.image_size)
+    sampling_fn = sampling.get_sampling_fn(config, sde, sampling_shape, inverse_scaler, sampling_eps)
+
+  state_full = restore_checkpoint(checkpoint_full, state_full, device=config.device)
+  state_subspace = restore_checkpoint(checkpoint_subspace, state_subspace, device=config.device)
+  ema_full.copy_to(score_model.full_score_model.parameters())
+  ema_subspace.copy_to(score_model.subspace_score_model.parameters())
+
+  # Compute log-likelihoods (bits/dim) if enabled
+  if config.eval.enable_bpd:
+    bpds = []
+    for repeat in range(bpd_num_repeats):
+      bpd_iter = iter(ds_bpd)  # pytype: disable=wrong-arg-types
+      for batch_id in range(len(ds_bpd)):
+        batch = next(bpd_iter)
+        eval_batch = torch.from_numpy(batch['image']._numpy()).to(config.device).float()
+        eval_batch = eval_batch.permute(0, 3, 1, 2)
+        eval_batch = scaler(eval_batch)
+        bpd = likelihood_fn(score_model, eval_batch)[0]
+        bpd = bpd.detach().cpu().numpy().reshape(-1)
+        bpds.extend(bpd)
+        logging.info(
+          "repeat: %d, batch: %d, mean bpd: %6f" % (repeat, batch_id, np.mean(np.asarray(bpds))))
+        
+        print({'n': len(bpds), 'bpd': np.mean(bpds), 'nfe_full': score_model.num_full, 'nfe_subspace': score_model.num_subspace})
+        bpd_round_id = batch_id + len(ds_bpd) * repeat
+        # Save bits/dim to disk or Google Cloud Storage
+
+  # Generate samples and compute IS/FID/KID when enabled
+  if config.eval.enable_sampling:
+    all_samples = []
+    num_sampling_rounds = (config.eval.num_samples - 1) // config.eval.batch_size + 1
+    for r in range(num_sampling_rounds):
+      logging.info("sampling -- round: %d" % (r))
+
+      # Directory to save samples. Different for each host to avoid writing conflicts
+      tf.io.gfile.makedirs(eval_dir)
+      samples, n = sampling_fn(score_model)
+
+      samples = np.clip(samples.permute(0, 2, 3, 1).cpu().numpy() * 255., 0, 255).astype(np.uint8)
+      samples = samples.reshape(
+        (-1, config.data.image_size, config.data.image_size, config.data.num_channels))
+      all_samples.append(samples)
+      print({'samples': sum(arr.shape[0] for arr in all_samples), 'nfe_full': score_model.num_full, 'nfe_subspace': score_model.num_subspace})
+    all_samples = np.concatenate(all_samples)
+    np.save(os.path.join(eval_dir, f"{save_name}.npy"), all_samples)    
+    
+    del score_model, optimizer_full, ema_full, state_full, optimizer_subspace, ema_subspace, state_subspace
+    torch.cuda.empty_cache()
+    
+    import evaluation
+    is_, fid, kid = evaluation.evaluate_samples(all_samples)
+    print('IS', is_, 'FID', fid, 'KID', kid)
+  

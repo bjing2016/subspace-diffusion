@@ -144,3 +144,50 @@ def run_inception_distributed(input_tensor,
       'pool_3': tf.concat(pool3, axis=0),
       'logits': tf.concat(logits, axis=0) if not inceptionv3 else None
     }
+
+
+def downsampling(image, resolution):
+  
+  """Shrink an image to the given resolution."""
+  h, w = image.shape[0], image.shape[1]
+  kh, kw = h//resolution[0], w//resolution[1]
+  image = tf.nn.avg_pool2d(tf.expand_dims(image, 0), kh, kw, padding='VALID') * kh
+  return tf.squeeze(image)
+
+import torch, torchvision
+inception_model = get_inception_model(inceptionv3=False)
+def evaluate_samples(samples, res=32):
+
+
+    samples = torch.tensor(samples).float()
+    if samples.shape[-1] == 3:
+        samples = samples.permute(0, 3, 1, 2)
+
+    samples = samples.permute(0, 2, 3, 1).numpy()
+
+    import gc
+    gc.collect()
+    latents = run_inception_distributed(samples, inception_model,
+                                        num_batches = samples.shape[0] // 250,
+                                        inceptionv3=False)
+    
+
+    all_logits = latents['logits']
+    all_pools = latents['pool_3']
+    # Load pre-computed dataset statistics.
+    data_stats = np.load('assets/stats/cifar10_stats.npz')
+    data_pools = data_stats["pool_3"]
+
+    # Compute FID/KID/IS on all samples together.
+
+    inception_score = tfgan.eval.classifier_score_from_logits(all_logits).numpy()
+    
+    fid = tfgan.eval.frechet_classifier_distance_from_activations(
+        data_pools, all_pools).numpy()   
+    tf_data_pools = tf.convert_to_tensor(data_pools)
+    tf_all_pools = tf.convert_to_tensor(all_pools)
+    kid = tfgan.eval.kernel_classifier_distance_from_activations(
+        tf_data_pools, tf_all_pools).numpy()
+    del tf_data_pools, tf_all_pools
+     
+    return inception_score, fid, kid

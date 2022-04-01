@@ -21,6 +21,7 @@ import sde_lib
 import numpy as np
 
 
+
 _MODELS = {}
 
 
@@ -85,12 +86,17 @@ def get_ddpm_params(config):
   }
 
 
-def create_model(config):
+def create_model(config, subspace=False):
   """Create the score model."""
-  model_name = config.model.name
-  score_model = get_model(model_name)(config)
-  score_model = score_model.to(config.device)
-  score_model = torch.nn.DataParallel(score_model)
+  
+  if subspace:
+    from models.subspace_model import SubspaceScore
+    score_model = SubspaceScore(config)
+  else:
+    model_name = config.model.name
+    score_model = get_model(model_name)(config)
+    score_model = score_model.to(config.device)
+    score_model = torch.nn.DataParallel(score_model)
   return score_model
 
 

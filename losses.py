@@ -22,6 +22,8 @@ import numpy as np
 from models import utils as mutils
 from sde_lib import VESDE, VPSDE
 
+from absl import flags
+FLAGS = flags.FLAGS
 
 def get_optimizer(config, params):
   """Returns a flax optimizer object based on `config`."""
@@ -81,7 +83,9 @@ def get_sde_loss_fn(sde, train, reduce_mean=True, continuous=True, likelihood_we
       loss: A scalar that represents the average loss value across the mini-batch.
     """
     score_fn = mutils.get_score_fn(sde, model, train=train, continuous=continuous)
-    t = torch.rand(batch.shape[0], device=batch.device) * (sde.T - eps) + eps
+    t = torch.rand(batch.shape[0], device=batch.device)
+
+    t = t * (sde.T - eps) + eps
     z = torch.randn_like(batch)
     mean, std = sde.marginal_prob(batch, t)
     perturbed_data = mean + std[:, None, None, None] * z
