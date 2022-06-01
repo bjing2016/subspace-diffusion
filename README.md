@@ -1,6 +1,8 @@
 # Subspace Diffusion Generative Models
 
-PyTorch implementation of [Subspace Diffusion Generative Models]() by B Jing, G Corso, R Berlinghieri, T Jaakkola.
+[![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/subspace-diffusion-generative-models/image-generation-on-cifar-10)](https://paperswithcode.com/sota/image-generation-on-cifar-10?p=subspace-diffusion-generative-models)
+
+PyTorch implementation of [Subspace Diffusion Generative Models](https://arxiv.org/abs/2205.01490) by B Jing,* G Corso,* R Berlinghieri, T Jaakkola.
 
 We present a method for accelerating and improving score-based generative models. Subspace diffusion restricts (or projects) the diffusion of the data distribution at high noise levels to lower-dimensional subspaces. Due to its reduced dimensionality, the score model for the projected distribution is easier to learn and is faster to evaluate. The original full-dimensional model is used to denoise only at lower noise levels, which reduces the number of effective function evaluations required. On CIFAR-10, our method provides inference speed-ups while preserving the capabilities and improving the performance of state-of-the-art models from [Song, et al., 2021](https://openreview.net/forum?id=PxTIG12RRHS).
 
